@@ -127,7 +127,8 @@ export const saveQuestion = (question: Question) => {
 };
 
 export const deleteQuestion = (id: string) => {
-  const questions = getQuestions().filter(q => q.id !== id);
+  // Use String conversion to ensure ID comparison works even if types mismatch
+  const questions = getQuestions().filter(q => String(q.id) !== String(id));
   localStorage.setItem(KEYS.QUESTIONS, JSON.stringify(questions));
 };
 

@@ -579,6 +579,8 @@ function StudentManager({ students, onAdd, onDelete, onImport }: { students: Stu
   );
 }
 
+const DRAFT_KEY = 'graha_cbt_question_draft';
+
 function QuestionManager({ questions, setQuestions, onImport, availableSubjects }: { questions: Question[], setQuestions: (q: Question[]) => void, onImport: (data: any[]) => void, availableSubjects: string[] }) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -607,6 +609,17 @@ function QuestionManager({ questions, setQuestions, onImport, availableSubjects 
       acc[sub] = (acc[sub] || 0) + 1;
       return acc;
   }, {} as Record<string, number>);
+
+  // Auto-save draft effect
+  useEffect(() => {
+    if (isAdding && !editingId) {
+        const draftData = {
+            text, type, subject, points, imageUrl,
+            options, correctIndices, matches, orderItems, keywordString
+        };
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(draftData));
+    }
+  }, [text, type, subject, points, imageUrl, options, correctIndices, matches, orderItems, keywordString, isAdding, editingId]);
 
   useEffect(() => {
     // If no filter selected yet, select the first available subject
@@ -644,12 +657,35 @@ function QuestionManager({ questions, setQuestions, onImport, availableSubjects 
 
   const startAdding = () => {
       setIsAdding(true);
-      resetForm();
-      // Pre-fill subject with currently filtered subject
-      if (filterSubject && filterSubject !== 'all') {
-          setSubject(filterSubject);
-      } else if (availableSubjects.length > 0) {
-          setSubject(availableSubjects[0]);
+      setEditingId(null);
+      
+      // Check for draft
+      const savedDraft = localStorage.getItem(DRAFT_KEY);
+      if (savedDraft) {
+          try {
+              const d = JSON.parse(savedDraft);
+              setText(d.text || '');
+              setType(d.type || 'multiple_choice');
+              setSubject(d.subject || (filterSubject && filterSubject !== 'all' ? filterSubject : availableSubjects[0] || ''));
+              setPoints(d.points || 10);
+              setImageUrl(d.imageUrl || '');
+              setOptions(d.options || ['', '', '', '']);
+              setCorrectIndices(d.correctIndices || []);
+              setMatches(d.matches || [{left: '', right: ''}]);
+              setOrderItems(d.orderItems || ['', '']);
+              setKeywordString(d.keywordString || '');
+          } catch (e) {
+              console.error("Error parsing draft", e);
+              resetForm();
+          }
+      } else {
+          resetForm();
+          // Pre-fill subject with currently filtered subject
+          if (filterSubject && filterSubject !== 'all') {
+              setSubject(filterSubject);
+          } else if (availableSubjects.length > 0) {
+              setSubject(availableSubjects[0]);
+          }
       }
   };
 
@@ -716,6 +752,7 @@ function QuestionManager({ questions, setQuestions, onImport, availableSubjects 
     setQuestions(Storage.getQuestions());
     setIsAdding(false);
     resetForm();
+    localStorage.removeItem(DRAFT_KEY); // Clear draft on successful save
   };
 
   const resetForm = () => {
@@ -730,6 +767,7 @@ function QuestionManager({ questions, setQuestions, onImport, availableSubjects 
     setKeywordString('');
     setError('');
     setEditingId(null);
+    localStorage.removeItem(DRAFT_KEY);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -788,6 +826,20 @@ function QuestionManager({ questions, setQuestions, onImport, availableSubjects 
           }, 0);
       } else {
           setText(text + symbol);
+      }
+  };
+
+  // --- DELETE HANDLER (FIXED) ---
+  const handleDeleteQuestion = (id: string) => {
+      if(window.confirm('Apakah Anda yakin ingin menghapus soal ini?')) {
+          Storage.deleteQuestion(id);
+          setQuestions(Storage.getQuestions());
+          
+          // If we deleted the question currently being edited, close the form
+          if (editingId === id) {
+              setIsAdding(false);
+              resetForm();
+          }
       }
   };
 
@@ -900,6 +952,13 @@ function QuestionManager({ questions, setQuestions, onImport, availableSubjects 
             <Edit size={24} className="text-indigo-600"/>
             {editingId ? 'Edit Soal' : 'Buat Soal Baru'}
           </h3>
+          {/* Draft Indicator */}
+          {!editingId && (
+              <div className="mb-6 bg-blue-50 text-blue-700 px-4 py-3 rounded-lg text-sm flex items-center gap-2 border border-blue-100">
+                  <Cloud size={16} />
+                  <span>Sistem menyimpan pekerjaan Anda secara otomatis. Jika Anda keluar, draft akan dimuat kembali.</span>
+              </div>
+          )}
           
           {error && (
             <div className="bg-white text-rose-600 p-4 rounded-xl mb-6 flex items-center gap-3 border border-rose-200 shadow-sm">
@@ -1189,12 +1248,7 @@ function QuestionManager({ questions, setQuestions, onImport, availableSubjects 
                     <button onClick={() => handleEdit(q)} className="text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 p-3 rounded-xl transition shadow-sm" title="Edit">
                         <Edit size={20} />
                     </button>
-                    <button onClick={() => {
-                        if(confirm('Hapus soal ini?')) {
-                            Storage.deleteQuestion(q.id);
-                            setQuestions(Storage.getQuestions());
-                        }
-                    }} className="text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 p-3 rounded-xl transition shadow-sm" title="Hapus">
+                    <button onClick={() => handleDeleteQuestion(q.id)} className="text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 p-3 rounded-xl transition shadow-sm" title="Hapus">
                         <Trash2 size={20} />
                     </button>
                 </div>
@@ -1222,97 +1276,80 @@ function QuestionManager({ questions, setQuestions, onImport, availableSubjects 
 
 function ResultAnalysis({ students, questions }: { students: Student[], questions: Question[] }) {
   // Simple stats
-  const completed = students.filter(s => s.status === 'completed');
-  const avgScore = completed.length > 0 
-    ? (completed.reduce((acc, s) => acc + s.score, 0) / completed.length).toFixed(1)
+  const completedStudents = students.filter(s => s.status === 'completed');
+  const avgScore = completedStudents.length > 0 
+    ? (completedStudents.reduce((acc, s) => acc + s.score, 0) / completedStudents.length).toFixed(1) 
     : '0';
-  const maxScore = completed.length > 0
-    ? Math.max(...completed.map(s => s.score))
-    : 0;
-
-  // CSV Export for Results
-  const handleExportResults = () => {
-      let csv = "Nama,Kelas,Sekolah,Skor,Status,Waktu Mulai\n";
-      students.forEach(s => {
-          csv += `"${s.name}","${s.className}","${s.school}","${s.score}","${s.status}","${s.startTime ? new Date(s.startTime).toLocaleString() : '-'}"\n`;
-      });
-      const blob = new Blob([csv], { type: 'text/csv' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'hasil_ujian.csv';
-      a.click();
-  };
 
   return (
     <div>
-        <div className="flex justify-between items-center mb-8">
-            <div>
-                <h2 className="text-3xl font-bold text-slate-800 flex items-center gap-3">
-                    <BarChart3 className="text-indigo-600" size={32}/> Analisis Hasil
-                </h2>
-                <p className="text-slate-500 mt-1">Pantau performa dan nilai peserta ujian secara real-time.</p>
-            </div>
-            <button onClick={handleExportResults} className="bg-emerald-600 text-white px-5 py-2.5 rounded-lg shadow-lg shadow-emerald-600/20 hover:bg-emerald-700 hover:-translate-y-0.5 transition-all flex items-center gap-2 text-sm font-bold">
-                <Download size={18}/> Export CSV
-            </button>
-        </div>
+       <div className="flex items-center gap-4 mb-8">
+         <div className="p-4 bg-white rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
+             <div className="w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center">
+                 <BarChart3 size={24} />
+             </div>
+             <div>
+                 <p className="text-xs text-slate-500 font-bold uppercase">Rata-rata Nilai</p>
+                 <p className="text-2xl font-black text-slate-800">{avgScore}</p>
+             </div>
+         </div>
+         <div className="p-4 bg-white rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
+             <div className="w-12 h-12 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center">
+                 <CheckCircle size={24} />
+             </div>
+             <div>
+                 <p className="text-xs text-slate-500 font-bold uppercase">Selesai Ujian</p>
+                 <p className="text-2xl font-black text-slate-800">{completedStudents.length} <span className="text-sm font-medium text-slate-400">/ {students.length}</span></p>
+             </div>
+         </div>
+       </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
-            <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-100 flex flex-col items-center justify-center text-center group hover:border-blue-200 transition-colors">
-                <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mb-4 group-hover:bg-blue-100 transition-colors">
-                    <Users size={24} />
-                </div>
-                <p className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Total Peserta</p>
-                <p className="text-4xl font-black text-slate-800">{students.length}</p>
-                <p className="text-xs text-slate-400 mt-2 font-medium bg-slate-50 px-3 py-1 rounded-full">{completed.length} Selesai</p>
-            </div>
-            <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-100 flex flex-col items-center justify-center text-center group hover:border-emerald-200 transition-colors">
-                <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center mb-4 group-hover:bg-emerald-100 transition-colors">
-                    <Award size={24} />
-                </div>
-                <p className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Rata-Rata Nilai</p>
-                <p className="text-4xl font-black text-emerald-600">{avgScore}</p>
-            </div>
-             <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-100 flex flex-col items-center justify-center text-center group hover:border-purple-200 transition-colors">
-                <div className="w-12 h-12 bg-purple-50 text-purple-600 rounded-full flex items-center justify-center mb-4 group-hover:bg-purple-100 transition-colors">
-                    <Award size={24} />
-                </div>
-                <p className="text-slate-400 text-xs font-bold uppercase tracking-wider mb-1">Nilai Tertinggi</p>
-                <p className="text-4xl font-black text-purple-600">{maxScore}</p>
-            </div>
-        </div>
-
-        <div className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden">
+       <div className="bg-white rounded-2xl shadow-lg border border-slate-200 overflow-hidden">
+         <div className="p-6 border-b border-slate-100">
+             <h3 className="font-bold text-slate-800">Detail Hasil Peserta</h3>
+         </div>
+         <div className="overflow-x-auto">
             <table className="w-full text-left">
-                <thead className="bg-slate-50 border-b border-slate-200">
+                <thead className="bg-slate-50 text-slate-500 text-xs font-bold uppercase tracking-wider">
                     <tr>
-                        <th className="p-5 font-bold text-slate-500 text-sm uppercase tracking-wider">Nama</th>
-                        <th className="p-5 font-bold text-slate-500 text-sm uppercase tracking-wider">Kelas</th>
-                        <th className="p-5 font-bold text-slate-500 text-sm uppercase tracking-wider">Status</th>
-                        <th className="p-5 font-bold text-slate-500 text-sm uppercase tracking-wider">Nilai</th>
-                        <th className="p-5 font-bold text-slate-500 text-sm uppercase tracking-wider">Detail</th>
+                        <th className="p-4">Nama</th>
+                        <th className="p-4">Kelas</th>
+                        <th className="p-4 text-center">Status</th>
+                        <th className="p-4 text-center">Nilai</th>
+                        <th className="p-4 text-center">Aksi</th>
                     </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
-                    {students.map(s => {
-                        return (
-                            <tr key={s.id} className="hover:bg-slate-50/80 bg-white transition">
-                                <td className="p-5 font-semibold text-slate-800">{s.name}</td>
-                                <td className="p-5 text-slate-600">{s.className}</td>
-                                <td className="p-5">
-                                    <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase border ${s.status === 'completed' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
-                                        {s.status === 'completed' ? 'Selesai' : s.status === 'in_progress' ? 'Mengerjakan' : 'Belum'}
-                                    </span>
-                                </td>
-                                <td className="p-5 font-black text-xl text-indigo-900">{s.score}</td>
-                                <td className="p-5 text-slate-400 text-sm">-</td> 
-                            </tr>
-                        );
-                    })}
+                <tbody className="divide-y divide-slate-100 text-sm">
+                    {students.map(s => (
+                        <tr key={s.id} className="hover:bg-slate-50">
+                            <td className="p-4 font-semibold text-slate-700">{s.name}</td>
+                            <td className="p-4 text-slate-600">{s.className}</td>
+                            <td className="p-4 text-center">
+                                <span className={`px-2 py-1 rounded text-xs font-bold ${s.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : s.status === 'in_progress' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
+                                    {s.status === 'completed' ? 'Selesai' : s.status === 'in_progress' ? 'Mengerjakan' : 'Belum'}
+                                </span>
+                            </td>
+                            <td className="p-4 text-center font-bold text-lg text-slate-800">{s.score}</td>
+                            <td className="p-4 text-center">
+                                <button 
+                                    onClick={() => {
+                                        if(confirm('Reset ujian siswa ini? Data jawaban akan dihapus.')) {
+                                            const newS = {...s, status: 'not_started' as const, answers: [], score: 0, startTime: undefined};
+                                            Storage.saveStudent(newS);
+                                            window.location.reload(); // Simple reload to refresh data
+                                        }
+                                    }}
+                                    className="text-rose-600 hover:text-rose-800 font-bold text-xs"
+                                >
+                                    Reset
+                                </button>
+                            </td>
+                        </tr>
+                    ))}
                 </tbody>
             </table>
-        </div>
+         </div>
+       </div>
     </div>
   );
 }
@@ -1321,9 +1358,9 @@ function ExamSettings({ availableSubjects, onUpdateSubjects }: { availableSubjec
     const [config, setConfig] = useState<ExamConfig>(Storage.getExamConfig());
     const [newSubject, setNewSubject] = useState('');
 
-    const handleSaveConfig = () => {
+    const handleSave = () => {
         Storage.saveExamConfig(config);
-        alert('Pengaturan disimpan.');
+        alert('Pengaturan berhasil disimpan.');
     };
 
     const addSubject = () => {
@@ -1332,179 +1369,142 @@ function ExamSettings({ availableSubjects, onUpdateSubjects }: { availableSubjec
             setNewSubject('');
         }
     };
-    
+
     const removeSubject = (sub: string) => {
         if(confirm(`Hapus mata pelajaran ${sub}?`)) {
             onUpdateSubjects(availableSubjects.filter(s => s !== sub));
         }
     };
 
-    // Helper for scheduling
-    const updateSchedule = (idx: number, field: keyof SubjectSchedule, value: string) => {
-        const newSchedules = [...(config.subjectSchedules || [])];
-        newSchedules[idx] = { ...newSchedules[idx], [field]: value };
-        setConfig({ ...config, subjectSchedules: newSchedules });
-    };
-
-    const addSchedule = () => {
-        const newSch: SubjectSchedule = {
-            id: Date.now().toString(),
-            subject: availableSubjects[0] || '',
-            scheduledStart: '',
-            scheduledEnd: ''
-        };
-        setConfig({ ...config, subjectSchedules: [...(config.subjectSchedules || []), newSch] });
-    };
-
-    const removeSchedule = (idx: number) => {
-        const newSchedules = [...(config.subjectSchedules || [])];
-        newSchedules.splice(idx, 1);
-        setConfig({ ...config, subjectSchedules: newSchedules });
-    };
-
     return (
-        <div>
-            <div className="flex justify-between items-center mb-8">
-                <div>
-                    <h2 className="text-3xl font-bold text-slate-800 flex items-center gap-3">
-                        <Settings className="text-indigo-600" size={32}/> Pengaturan Ujian
-                    </h2>
-                    <p className="text-slate-500 mt-1">Konfigurasi umum, jadwal, dan mata pelajaran.</p>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-100">
+                <h3 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2"><Settings className="text-indigo-600"/> Konfigurasi Utama</h3>
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-2">Judul Ujian</label>
+                        <input 
+                            value={config.title}
+                            onChange={e => setConfig({...config, title: e.target.value})}
+                            className="w-full p-3 border border-slate-200 rounded-xl focus:ring-4 focus:ring-indigo-100 outline-none"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-2">Deskripsi</label>
+                        <textarea 
+                            value={config.description}
+                            onChange={e => setConfig({...config, description: e.target.value})}
+                            className="w-full p-3 border border-slate-200 rounded-xl focus:ring-4 focus:ring-indigo-100 outline-none h-24"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-bold text-slate-700 mb-2">Durasi (Menit)</label>
+                        <input 
+                            type="number"
+                            value={config.durationMinutes}
+                            onChange={e => setConfig({...config, durationMinutes: Number(e.target.value)})}
+                            className="w-full p-3 border border-slate-200 rounded-xl focus:ring-4 focus:ring-indigo-100 outline-none"
+                        />
+                    </div>
+                    <div className="pt-4">
+                        <h4 className="font-bold text-slate-800 mb-2">Jadwal Global (Opsional)</h4>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">Mulai</label>
+                                <input 
+                                    type="datetime-local"
+                                    value={config.scheduledStart || ''}
+                                    onChange={e => setConfig({...config, scheduledStart: e.target.value})}
+                                    className="w-full p-2 border border-slate-200 rounded-lg text-sm"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">Selesai</label>
+                                <input 
+                                    type="datetime-local"
+                                    value={config.scheduledEnd || ''}
+                                    onChange={e => setConfig({...config, scheduledEnd: e.target.value})}
+                                    className="w-full p-2 border border-slate-200 rounded-lg text-sm"
+                                />
+                            </div>
+                        </div>
+                    </div>
+                    <button onClick={handleSave} className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold hover:bg-indigo-700 mt-4 flex items-center justify-center gap-2">
+                        <Save size={18} /> Simpan Pengaturan
+                    </button>
                 </div>
-                <button onClick={handleSaveConfig} className="bg-indigo-600 text-white px-6 py-3 rounded-xl shadow-lg shadow-indigo-600/30 hover:bg-indigo-700 hover:-translate-y-0.5 transition-all font-bold flex items-center gap-2">
-                    <Save size={20}/> Simpan Perubahan
-                </button>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                {/* General Settings */}
-                <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-200">
-                    <h3 className="text-lg font-bold text-slate-800 mb-6 border-b border-slate-100 pb-4">Informasi Umum</h3>
-                    <div className="space-y-5">
-                        <div>
-                            <label className="block text-sm font-bold text-slate-700 mb-2">Judul Ujian</label>
-                            <input 
-                                className="w-full p-3 border border-slate-200 rounded-xl bg-white focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition text-slate-800"
-                                value={config.title}
-                                onChange={e => setConfig({...config, title: e.target.value})}
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-bold text-slate-700 mb-2">Deskripsi</label>
-                            <textarea 
-                                className="w-full p-3 border border-slate-200 rounded-xl h-32 bg-white focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition text-slate-800 resize-none"
-                                value={config.description}
-                                onChange={e => setConfig({...config, description: e.target.value})}
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-bold text-slate-700 mb-2">Durasi (Menit)</label>
-                            <input 
-                                type="number"
-                                className="w-full p-3 border border-slate-200 rounded-xl bg-white focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition text-slate-800"
-                                value={config.durationMinutes}
-                                onChange={e => setConfig({...config, durationMinutes: Number(e.target.value)})}
-                            />
-                        </div>
-                    </div>
+            <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-100">
+                <h3 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2"><BookOpen className="text-indigo-600"/> Mata Pelajaran</h3>
+                
+                <div className="flex gap-2 mb-6">
+                    <input 
+                        value={newSubject}
+                        onChange={e => setNewSubject(e.target.value)}
+                        placeholder="Nama Mapel Baru..."
+                        className="flex-1 p-3 border border-slate-200 rounded-xl outline-none focus:border-indigo-500"
+                    />
+                    <button onClick={addSubject} className="bg-emerald-600 text-white px-4 rounded-xl font-bold hover:bg-emerald-700"><Plus size={20}/></button>
                 </div>
 
-                {/* Subject Management */}
-                <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-200">
-                    <h3 className="text-lg font-bold text-slate-800 mb-6 border-b border-slate-100 pb-4">Mata Pelajaran</h3>
-                    <div className="flex gap-3 mb-6">
-                        <input 
-                            className="flex-1 p-3 border border-slate-200 rounded-xl bg-white focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition text-slate-800"
-                            placeholder="Tambah mapel baru..."
-                            value={newSubject}
-                            onChange={e => setNewSubject(e.target.value)}
-                        />
-                        <button onClick={addSubject} className="bg-emerald-600 text-white px-6 rounded-xl font-bold hover:bg-emerald-700 shadow-md transition hover:-translate-y-0.5">Tambah</button>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                        {availableSubjects.map(sub => (
-                            <span key={sub} className="bg-white px-4 py-2 rounded-full text-sm font-bold flex items-center gap-2 border border-slate-200 shadow-sm text-slate-700">
-                                {sub}
-                                <button onClick={() => removeSubject(sub)} className="text-rose-400 hover:text-rose-600 hover:bg-rose-50 rounded-full p-0.5 transition"><X size={14}/></button>
-                            </span>
-                        ))}
-                    </div>
-                </div>
-
-                {/* Global Schedule */}
-                <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-200">
-                    <h3 className="text-lg font-bold text-slate-800 mb-6 border-b border-slate-100 pb-4">Jadwal Global (Opsional)</h3>
-                    <p className="text-sm text-slate-500 mb-6 bg-slate-50 p-4 rounded-lg border border-slate-100">Jika diisi, ujian hanya bisa diakses dalam rentang waktu ini (berlaku untuk semua mapel jika tidak ada jadwal spesifik).</p>
-                    <div className="grid grid-cols-2 gap-6">
-                        <div>
-                            <label className="block text-sm font-bold text-slate-700 mb-2">Waktu Mulai</label>
-                            <input 
-                                type="datetime-local"
-                                className="w-full p-3 border border-slate-200 rounded-xl bg-white focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition text-slate-800"
-                                value={config.scheduledStart || ''}
-                                onChange={e => setConfig({...config, scheduledStart: e.target.value})}
-                            />
+                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                    {availableSubjects.map(sub => (
+                        <div key={sub} className="flex justify-between items-center p-3 bg-slate-50 rounded-lg border border-slate-100">
+                            <span className="font-bold text-slate-700">{sub}</span>
+                            <button onClick={() => removeSubject(sub)} className="text-rose-500 hover:bg-rose-100 p-2 rounded-lg"><Trash2 size={16}/></button>
                         </div>
-                        <div>
-                            <label className="block text-sm font-bold text-slate-700 mb-2">Waktu Selesai</label>
-                            <input 
-                                type="datetime-local"
-                                className="w-full p-3 border border-slate-200 rounded-xl bg-white focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 outline-none transition text-slate-800"
-                                value={config.scheduledEnd || ''}
-                                onChange={e => setConfig({...config, scheduledEnd: e.target.value})}
-                            />
-                        </div>
-                    </div>
+                    ))}
+                    {availableSubjects.length === 0 && <p className="text-center text-slate-400 italic">Belum ada mata pelajaran.</p>}
                 </div>
-
-                {/* Subject Specific Schedules */}
-                 <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-200 lg:col-span-2">
-                    <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
-                         <h3 className="text-lg font-bold text-slate-800">Jadwal Per Mapel (Sesi)</h3>
-                         <button onClick={addSchedule} className="text-sm bg-indigo-50 text-indigo-600 px-4 py-2 rounded-lg font-bold border border-indigo-100 hover:bg-indigo-100 transition">+ Tambah Sesi</button>
-                    </div>
-                    
-                    {(!config.subjectSchedules || config.subjectSchedules.length === 0) ? (
-                        <p className="text-slate-400 italic text-sm text-center py-4">Belum ada jadwal spesifik. Gunakan jadwal global atau tambah sesi baru.</p>
-                    ) : (
-                        <div className="space-y-4">
-                            {config.subjectSchedules.map((sch, idx) => (
-                                <div key={idx} className="flex flex-col md:flex-row gap-4 items-end md:items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
-                                    <div className="flex-1 w-full">
-                                        <label className="text-[10px] uppercase font-bold text-slate-400 mb-1 block">Mapel</label>
-                                        <select 
-                                            className="w-full p-3 border border-slate-200 rounded-xl bg-white focus:ring-2 focus:ring-indigo-200 focus:border-indigo-500 outline-none text-slate-800 font-medium"
-                                            value={sch.subject}
-                                            onChange={e => updateSchedule(idx, 'subject', e.target.value)}
-                                        >
-                                            {availableSubjects.map(s => <option key={s} value={s}>{s}</option>)}
-                                        </select>
-                                    </div>
-                                    <div className="flex-1 w-full">
-                                        <label className="text-[10px] uppercase font-bold text-slate-400 mb-1 block">Mulai</label>
+                
+                <div className="mt-8 pt-6 border-t border-slate-100">
+                     <h4 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Calendar size={18}/> Jadwal Sesi Per Mapel</h4>
+                     <p className="text-xs text-slate-500 mb-4">Atur jadwal spesifik agar siswa hanya bisa login ke mapel tertentu pada jam tertentu.</p>
+                     
+                     {/* Schedule Editor for Subjects */}
+                     <div className="space-y-4">
+                        {availableSubjects.map(sub => {
+                            const schedule = config.subjectSchedules?.find(s => s.subject === sub) || {id: '', subject: sub, scheduledStart: '', scheduledEnd: ''};
+                            return (
+                                <div key={sub} className="p-3 border border-slate-200 rounded-xl bg-slate-50/50">
+                                    <div className="font-bold text-indigo-900 mb-2">{sub}</div>
+                                    <div className="grid grid-cols-2 gap-2">
                                         <input 
-                                            type="datetime-local"
-                                            className="w-full p-3 border border-slate-200 rounded-xl bg-white focus:ring-2 focus:ring-indigo-200 focus:border-indigo-500 outline-none text-slate-800"
-                                            value={sch.scheduledStart}
-                                            onChange={e => updateSchedule(idx, 'scheduledStart', e.target.value)}
+                                            type="datetime-local" 
+                                            className="text-xs p-1.5 border rounded"
+                                            value={schedule.scheduledStart}
+                                            onChange={(e) => {
+                                                const newSchedules = config.subjectSchedules ? [...config.subjectSchedules] : [];
+                                                const idx = newSchedules.findIndex(s => s.subject === sub);
+                                                const newItem = { ...schedule, subject: sub, scheduledStart: e.target.value, id: schedule.id || Date.now().toString() };
+                                                
+                                                if(idx >= 0) newSchedules[idx] = newItem;
+                                                else newSchedules.push(newItem);
+                                                
+                                                setConfig({...config, subjectSchedules: newSchedules});
+                                            }}
+                                        />
+                                        <input 
+                                            type="datetime-local" 
+                                            className="text-xs p-1.5 border rounded"
+                                            value={schedule.scheduledEnd}
+                                            onChange={(e) => {
+                                                const newSchedules = config.subjectSchedules ? [...config.subjectSchedules] : [];
+                                                const idx = newSchedules.findIndex(s => s.subject === sub);
+                                                const newItem = { ...schedule, subject: sub, scheduledEnd: e.target.value, id: schedule.id || Date.now().toString() };
+                                                
+                                                if(idx >= 0) newSchedules[idx] = newItem;
+                                                else newSchedules.push(newItem);
+                                                
+                                                setConfig({...config, subjectSchedules: newSchedules});
+                                            }}
                                         />
                                     </div>
-                                    <div className="flex-1 w-full">
-                                        <label className="text-[10px] uppercase font-bold text-slate-400 mb-1 block">Selesai</label>
-                                        <input 
-                                            type="datetime-local"
-                                            className="w-full p-3 border border-slate-200 rounded-xl bg-white focus:ring-2 focus:ring-indigo-200 focus:border-indigo-500 outline-none text-slate-800"
-                                            value={sch.scheduledEnd}
-                                            onChange={e => updateSchedule(idx, 'scheduledEnd', e.target.value)}
-                                        />
-                                    </div>
-                                    <button onClick={() => removeSchedule(idx)} className="bg-white border border-rose-200 text-rose-500 p-3 rounded-xl hover:bg-rose-50 hover:text-rose-700 transition self-end md:self-center">
-                                        <Trash2 size={20}/>
-                                    </button>
                                 </div>
-                            ))}
-                        </div>
-                    )}
+                            )
+                        })}
+                     </div>
                 </div>
             </div>
         </div>
